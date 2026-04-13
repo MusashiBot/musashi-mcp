@@ -135,18 +135,21 @@ export class StreamableHttpServer {
         }
 
         // ── Auth gate: all other requests require a valid Bearer token ──────────
+        const wwwAuthenticate = `Bearer realm="${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource"`;
         const apiKey = extractApiKey(req.headers['authorization'] as string | undefined);
 
         if (!apiKey) {
-          res.status(401).json({
-            error: 'Unauthorized: Authorization header with valid Bearer token required',
-          });
+          res.status(401)
+            .set('WWW-Authenticate', wwwAuthenticate)
+            .json({ error: 'Unauthorized: Authorization header with valid Bearer token required' });
           return;
         }
 
         if (!verifyApiKey(apiKey)) {
           console.warn(`[Streamable HTTP] Rejected invalid API key: ${getTruncatedKey(apiKey)}`);
-          res.status(401).json({ error: 'Unauthorized: invalid API key' });
+          res.status(401)
+            .set('WWW-Authenticate', wwwAuthenticate)
+            .json({ error: 'Unauthorized: invalid API key' });
           return;
         }
 
