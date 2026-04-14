@@ -14,6 +14,7 @@ import {
   handleOAuthProtectedResourceMetadata,
   handleOAuthToken,
 } from './oauth-handler.js';
+import { verifyApiKey, extractApiKey } from '../transports/auth.js';
 
 // Supported MCP protocol version
 const SUPPORTED_PROTOCOL_VERSION = '2025-06-18';
@@ -155,6 +156,17 @@ export class StreamableHttpServer {
         res.status(500).json({ error: 'Internal server error' });
       }
     };
+    
+    // Authentication middleware for MCP routes
+    const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+      const apiKey = extractApiKey(req.headers.authorization);
+      if (!apiKey || !verifyApiKey(apiKey)) {
+        res.status(401).json({ error: 'Unauthorized: Invalid or missing Bearer token' });
+        return;
+      }
+      (req as any).apiKey = apiKey;
+      next();
+    };
 
     // Health check endpoint (public, no MCP protocol)
     this.app.get('/health', (_req: Request, res: Response) => {
@@ -176,9 +188,9 @@ export class StreamableHttpServer {
     this.app.post('/oauth/authorize', handleOAuthAuthorize);
     this.app.post('/oauth/token', handleOAuthToken);
 
-    // Accept both the explicit MCP endpoint and the bare host URL.
-    this.app.all('/', handleMcpRoute);
-    this.app.all('/mcp', handleMcpRoute);
+    // OAuth routes (authMiddleware applied)
+    this.app.all('/', authMiddleware, handleMcpRoute);
+    this.app.all('/mcp', authMiddleware, handleMcpRoute);
 
     // 404 handler
     this.app.use((_req: Request, res: Response) => {

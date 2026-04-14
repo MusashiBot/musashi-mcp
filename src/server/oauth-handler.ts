@@ -6,6 +6,7 @@ interface AuthorizationCodeRecord {
   apiKey: string;
   expiresAt: number;
   codeChallenge?: string;
+  codeChallengeMethod?: 'S256' | 'plain'; // Added to support PKCE code challenge method, defaulting to 'plain' if not provided
 }
 
 const authCodes = new Map<string, AuthorizationCodeRecord>();
@@ -121,6 +122,10 @@ export function handleOAuthAuthorize(req: Request, res: Response): void {
       : typeof req.body?.code_challenge === 'string'
         ? req.body.code_challenge
         : '';
+  const codeChallengeMethod = 
+    (req.query.code_challenge_method as string) || 
+    (req.body?.code_challenge_method as string) || 
+    'plain'; // Default to 'plain' per OAuth2 specs if not provided
 
   if (!redirectUri || !state) {
     res.status(400).json({
@@ -150,6 +155,7 @@ export function handleOAuthAuthorize(req: Request, res: Response): void {
       apiKey,
       expiresAt: Date.now() + AUTH_CODE_TTL_MS,
       codeChallenge: codeChallenge || undefined,
+      codeChallengeMethod: codeChallenge ? (codeChallengeMethod as 'S256' | 'plain') : undefined, 
     });
 
     const redirectUrl = new URL(redirectUri);
@@ -208,9 +214,28 @@ export function handleOAuthToken(req: Request, res: Response): void {
     return;
   }
 
-  if (authData.codeChallenge && codeVerifier) {
-    const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-    if (challenge !== authData.codeChallenge) {
+  // If a challenge exists, missing code_verifier is rejected 
+  if (authData.codeChallenge) {
+    if (!codeVerifier) { //If missing 
+      res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'code_verifier is required when code_challenge is present',
+      });
+      return;
+    }
+
+    let isValid = false;
+
+    if (authData.codeChallengeMethod === 'S256') {
+      // S256: Hash the verifier and compare
+      const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+      isValid = challenge === authData.codeChallenge;
+    } else {
+      // plain: Direct string comparison
+      isValid = codeVerifier === authData.codeChallenge;
+    }
+
+    if (!isValid) { //If not matching
       res.status(400).json({
         error: 'invalid_grant',
         error_description: 'Code verifier does not match challenge',
