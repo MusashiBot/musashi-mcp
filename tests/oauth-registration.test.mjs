@@ -218,6 +218,43 @@ test('OAuth token exchange succeeds for registered public clients with matching 
 
   assert.equal(tokenResponse.status, 200);
   const payload = await tokenResponse.json();
-  assert.equal(payload.access_token, 'mcp_sk_test_oauth_key');
+  assert.equal(typeof payload.access_token, 'string');
+  assert.notEqual(payload.access_token, 'mcp_sk_test_oauth_key');
+  assert.equal(payload.access_token.split('.').length, 3);
   assert.equal(payload.token_type, 'Bearer');
+  assert.equal(payload.expires_in, 900);
+});
+
+test('OAuth authorize rejects unknown clients and mismatched redirect_uri', async (t) => {
+  const port = 4700 + Math.floor(Math.random() * 200);
+  const child = createServer(port);
+
+  t.after(async () => {
+    await stopChildProcess(child);
+  });
+
+  await waitForJson(`http://127.0.0.1:${port}/health`);
+
+  const unknownClientResponse = await fetch(`http://127.0.0.1:${port}/oauth/authorize?client_id=unknown&redirect_uri=https://chatgpt.com/connector/oauth/callback&state=abc`);
+  assert.equal(unknownClientResponse.status, 400);
+  const unknownClientPayload = await unknownClientResponse.json();
+  assert.equal(unknownClientPayload.error, 'invalid_client');
+
+  const registerResponse = await fetch(`http://127.0.0.1:${port}/oauth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      client_name: 'ChatGPT Musashi Test',
+      redirect_uris: ['https://chatgpt.com/connector/oauth/callback'],
+      token_endpoint_auth_method: 'none',
+    }),
+  });
+  const client = await registerResponse.json();
+
+  const mismatchedRedirectResponse = await fetch(`http://127.0.0.1:${port}/oauth/authorize?client_id=${client.client_id}&redirect_uri=https://chat.openai.com/oauth/callback&state=abc`);
+  assert.equal(mismatchedRedirectResponse.status, 400);
+  const mismatchedRedirectPayload = await mismatchedRedirectResponse.json();
+  assert.equal(mismatchedRedirectPayload.error, 'invalid_request');
 });
