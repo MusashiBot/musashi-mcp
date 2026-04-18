@@ -85,6 +85,10 @@ test('Streamable MCP requires Authorization header', async (t) => {
   });
 
   assert.equal(response.status, 401);
+  assert.equal(
+    response.headers.get('www-authenticate'),
+    `Bearer realm="http://127.0.0.1:${port}/.well-known/oauth-protected-resource"`
+  );
 });
 
 test('Streamable MCP sessions are bound to authenticated principal', async (t) => {

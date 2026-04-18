@@ -229,7 +229,8 @@ export class StreamableHttpServer {
       if (rawApiKey) {
         console.warn(`[Streamable HTTP] Rejected invalid API key: ${getTruncatedKey(rawApiKey)}`);
       }
-      res.setHeader('WWW-Authenticate', 'Bearer realm="musashi-mcp"');
+      const protectedResourceMetadata = `${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource`;
+      res.setHeader('WWW-Authenticate', `Bearer realm="${protectedResourceMetadata}"`);
       res.status(401).json({
         error: 'Unauthorized. Provide a valid API key or OAuth access token in Authorization: Bearer <token>.',
       });
