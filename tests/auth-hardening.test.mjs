@@ -9,11 +9,16 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 
 const VALID_KEY = 'mcp_sk_test_hardening_key_abc123';
+const REDIRECT_URI = 'http://localhost/callback';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomPort() {
+  return 18000 + Math.floor(Math.random() * 2000);
 }
 
 async function waitForServer(url, attempts = 40) {
@@ -72,7 +77,7 @@ const INIT_HEADERS = {
 // ── Bearer auth tests ─────────────────────────────────────────────────────────
 
 test('unauthorized initialize is rejected (no token)', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   await waitForServer(`http://127.0.0.1:${port}/health`);
@@ -87,7 +92,7 @@ test('unauthorized initialize is rejected (no token)', async (t) => {
 });
 
 test('invalid bearer token is rejected', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   await waitForServer(`http://127.0.0.1:${port}/health`);
@@ -102,7 +107,7 @@ test('invalid bearer token is rejected', async (t) => {
 });
 
 test('valid bearer token allows initialize and returns a session ID', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   await waitForServer(`http://127.0.0.1:${port}/health`);
@@ -124,9 +129,28 @@ test('valid bearer token allows initialize and returns a session ID', async (t) 
  * Obtain a real authorization code from the server by posting the API key
  * and code_challenge to /oauth/authorize.
  */
+async function registerClient(baseUrl) {
+  const res = await fetch(`${baseUrl}/oauth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_name: 'PKCE hardening test',
+      redirect_uris: [REDIRECT_URI],
+      token_endpoint_auth_method: 'none',
+    }),
+  });
+
+  assert.equal(res.status, 201, 'Expected dynamic client registration to succeed');
+  const body = await res.json();
+  assert.equal(typeof body.client_id, 'string');
+  return body.client_id;
+}
+
 async function getAuthCode(baseUrl, codeChallenge, codeChallengeMethod = 'S256') {
+  const clientId = await registerClient(baseUrl);
   const params = new URLSearchParams({
-    redirect_uri: 'http://localhost/callback',
+    client_id: clientId,
+    redirect_uri: REDIRECT_URI,
     state: 'test-state',
     code_challenge: codeChallenge,
     code_challenge_method: codeChallengeMethod,
@@ -146,11 +170,16 @@ async function getAuthCode(baseUrl, codeChallenge, codeChallengeMethod = 'S256')
   const location = res.headers.get('location');
   const code = new URL(location).searchParams.get('code');
   assert.ok(code, 'Authorization code missing from redirect');
-  return code;
+  return { clientId, code };
 }
 
-async function exchangeToken(baseUrl, code, codeVerifier) {
-  const params = new URLSearchParams({ grant_type: 'authorization_code', code });
+async function exchangeToken(baseUrl, authCode, codeVerifier) {
+  const params = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code: authCode.code,
+    client_id: authCode.clientId,
+    redirect_uri: REDIRECT_URI,
+  });
   if (codeVerifier !== undefined) params.set('code_verifier', codeVerifier);
 
   return fetch(`${baseUrl}/oauth/token`, {
@@ -161,7 +190,7 @@ async function exchangeToken(baseUrl, code, codeVerifier) {
 }
 
 test('token exchange fails when code_verifier is missing but challenge exists', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   const base = `http://127.0.0.1:${port}`;
@@ -181,7 +210,7 @@ test('token exchange fails when code_verifier is missing but challenge exists', 
 });
 
 test('token exchange fails with a wrong code_verifier', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   const base = `http://127.0.0.1:${port}`;
@@ -199,7 +228,7 @@ test('token exchange fails with a wrong code_verifier', async (t) => {
 });
 
 test('token exchange succeeds with correct S256 code_verifier', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   const base = `http://127.0.0.1:${port}`;
@@ -217,7 +246,7 @@ test('token exchange succeeds with correct S256 code_verifier', async (t) => {
 });
 
 test('token exchange succeeds with plain method', async (t) => {
-  const port = 3700 + Math.floor(Math.random() * 200);
+  const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   const base = `http://127.0.0.1:${port}`;
