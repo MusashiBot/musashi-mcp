@@ -150,7 +150,12 @@ function validateRedirectUri(redirectUri: string): boolean {
   }
 }
 
-function getBaseUrl(req: Request): string {
+export function getPublicBaseUrl(req: Request): string {
+  const configuredBaseUrl = process.env.MUSASHI_MCP_PUBLIC_BASE_URL?.trim();
+  if (configuredBaseUrl) {
+    return configuredBaseUrl.replace(/\/+$/, '');
+  }
+
   return `${req.protocol}://${req.get('host')}`;
 }
 
@@ -211,7 +216,7 @@ function renderAuthorizeForm(options: {
 }
 
 export function handleOAuthDiscovery(req: Request, res: Response): void {
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getPublicBaseUrl(req);
   res.json({
     issuer: baseUrl,
     authorization_endpoint: `${baseUrl}/oauth/authorize`,
@@ -225,7 +230,7 @@ export function handleOAuthDiscovery(req: Request, res: Response): void {
 }
 
 export function handleOAuthProtectedResourceMetadata(req: Request, res: Response): void {
-  const baseUrl = getBaseUrl(req);
+  const baseUrl = getPublicBaseUrl(req);
   res.json({
     resource: `${baseUrl}/mcp`,
     authorization_servers: [baseUrl],

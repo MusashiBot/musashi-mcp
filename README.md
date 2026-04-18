@@ -127,6 +127,7 @@ pnpm install
 
 - `MUSASHI_API_BASE_URL`: Musashi API base URL
 - `PORT`: HTTP port when running with `--transport=http`
+- `MUSASHI_MCP_PUBLIC_BASE_URL`: optional public MCP server base URL for OAuth metadata
 - `MUSASHI_MCP_API_KEY`: optional single valid MCP API key
 - `MCP_API_KEYS`: optional comma-separated list of valid MCP API keys
 
@@ -135,6 +136,7 @@ Example local values:
 ```bash
 MUSASHI_API_BASE_URL=http://127.0.0.1:3000
 PORT=3030
+MUSASHI_MCP_PUBLIC_BASE_URL=https://your-mcp-server.example.com
 MUSASHI_MCP_API_KEY=mcp_sk_your_key_here
 ```
 

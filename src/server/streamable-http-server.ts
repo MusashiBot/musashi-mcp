@@ -14,6 +14,7 @@ import {
   handleOAuthProtectedResourceMetadata,
   handleOAuthRegister,
   handleOAuthToken,
+  getPublicBaseUrl,
   verifyOAuthAccessToken,
 } from './oauth-handler.js';
 import { extractApiKey, verifyApiKey, getTruncatedKey } from '../transports/auth.js';
@@ -229,8 +230,11 @@ export class StreamableHttpServer {
       if (rawApiKey) {
         console.warn(`[Streamable HTTP] Rejected invalid API key: ${getTruncatedKey(rawApiKey)}`);
       }
-      const protectedResourceMetadata = `${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource`;
-      res.setHeader('WWW-Authenticate', `Bearer realm="${protectedResourceMetadata}"`);
+      const protectedResourceMetadata = `${getPublicBaseUrl(req)}/.well-known/oauth-protected-resource`;
+      res.setHeader(
+        'WWW-Authenticate',
+        `Bearer realm="mcp", resource_metadata="${protectedResourceMetadata}"`
+      );
       res.status(401).json({
         error: 'Unauthorized. Provide a valid API key or OAuth access token in Authorization: Bearer <token>.',
       });

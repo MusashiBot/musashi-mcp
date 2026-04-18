@@ -110,3 +110,36 @@ test('HTTP transport exposes OAuth discovery metadata', async (t) => {
   assert.deepEqual(discovery.response_types_supported, ['code']);
   assert.deepEqual(discovery.grant_types_supported, ['authorization_code']);
 });
+
+test('HTTP transport honors configured public MCP base URL in OAuth metadata', async (t) => {
+  const port = 3900 + Math.floor(Math.random() * 300);
+  const publicBaseUrl = 'https://musashi-mcp.example.com';
+  const child = spawn(process.execPath, ['dist/index.js', '--transport=http'], {
+    cwd: new URL('..', import.meta.url),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      MUSASHI_API_BASE_URL: 'http://127.0.0.1:3000',
+      MUSASHI_MCP_API_KEY: 'mcp_sk_test_oauth_key',
+      MUSASHI_MCP_PUBLIC_BASE_URL: `${publicBaseUrl}/`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  t.after(async () => {
+    await stopChildProcess(child);
+  });
+
+  const protectedResourceResponse = await waitForHealth(
+    `http://127.0.0.1:${port}/.well-known/oauth-protected-resource`
+  );
+  const protectedResource = await protectedResourceResponse.json();
+  assert.equal(protectedResource.resource, `${publicBaseUrl}/mcp`);
+  assert.deepEqual(protectedResource.authorization_servers, [publicBaseUrl]);
+
+  const discoveryResponse = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`);
+  const discovery = await discoveryResponse.json();
+  assert.equal(discovery.issuer, publicBaseUrl);
+  assert.equal(discovery.authorization_endpoint, `${publicBaseUrl}/oauth/authorize`);
+  assert.equal(discovery.token_endpoint, `${publicBaseUrl}/oauth/token`);
+});

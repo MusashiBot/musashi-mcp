@@ -87,7 +87,54 @@ test('Streamable MCP requires Authorization header', async (t) => {
   assert.equal(response.status, 401);
   assert.equal(
     response.headers.get('www-authenticate'),
-    `Bearer realm="http://127.0.0.1:${port}/.well-known/oauth-protected-resource"`
+    `Bearer realm="mcp", resource_metadata="http://127.0.0.1:${port}/.well-known/oauth-protected-resource"`
+  );
+});
+
+test('WWW-Authenticate uses configured public MCP metadata URL', async (t) => {
+  const port = 5350 + Math.floor(Math.random() * 200);
+  const publicBaseUrl = 'https://musashi-mcp.example.com';
+  const child = spawn(process.execPath, ['dist/index.js', '--transport=http'], {
+    cwd: new URL('..', import.meta.url),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      MUSASHI_API_BASE_URL: 'http://127.0.0.1:3000',
+      MUSASHI_MCP_API_KEY: 'mcp_sk_auth_required_key',
+      MUSASHI_MCP_PUBLIC_BASE_URL: `${publicBaseUrl}/`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  t.after(async () => {
+    await stopChildProcess(child);
+  });
+
+  await waitForHealth(`http://127.0.0.1:${port}/health`);
+
+  const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'MCP-Protocol-Version': '2025-06-18',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'auth-test', version: '1.0.0' },
+      },
+    }),
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(
+    response.headers.get('www-authenticate'),
+    `Bearer realm="mcp", resource_metadata="${publicBaseUrl}/.well-known/oauth-protected-resource"`
   );
 });
 
