@@ -14,15 +14,16 @@ import {
   handleOAuthProtectedResourceMetadata,
   handleOAuthRegister,
   handleOAuthToken,
+  verifyOAuthAccessToken,
 } from './oauth-handler.js';
 import { extractApiKey, verifyApiKey, getTruncatedKey } from '../transports/auth.js';
 
-// Supported MCP protocol version
 const SUPPORTED_PROTOCOL_VERSION = '2025-06-18';
 const LEGACY_PROTOCOL_VERSION = '2025-03-26';
 
 interface Session {
   id: string;
+  principal: string;
   createdAt: Date;
   expiresAt: Date;
   sseStreams: Set<Response>;
@@ -44,8 +45,8 @@ export class StreamableHttpServer {
   private onRequest: (sessionId: string | null, request: any) => Promise<any>;
   private onNotification: (sessionId: string | null, notification: any) => Promise<void>;
   private onResponse: (sessionId: string | null, response: any) => Promise<void>;
-
-  private readonly SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+  private readonly SESSION_TTL_MS = 30 * 60 * 1000;
+  private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(options: StreamableHttpServerOptions) {
     this.app = express();
@@ -111,10 +112,9 @@ export class StreamableHttpServer {
   private setupRoutes(): void {
     const handleMcpRoute = async (req: Request, res: Response) => {
       try {
-        // ── Public GET: discovery info, no auth required ────────────────────────
         if (req.method === 'GET') {
-          const accept    = req.headers['accept']           as string | undefined;
-          const sessionId = req.headers['mcp-session-id']  as string | undefined;
+          const accept = req.headers['accept'] as string | undefined;
+          const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
           if (!sessionId && (!accept || !accept.includes('text/event-stream'))) {
             res.status(200).json({
@@ -129,29 +129,11 @@ export class StreamableHttpServer {
           }
         }
 
-        // ── OPTIONS: CORS preflight, no auth required ───────────────────────────
         if (req.method === 'OPTIONS') {
           res.status(200).end();
           return;
         }
 
-        // ── Auth gate: all other requests require a valid Bearer token ──────────
-        const apiKey = extractApiKey(req.headers['authorization'] as string | undefined);
-
-        if (!apiKey) {
-          res.status(401).json({
-            error: 'Unauthorized: Authorization header with valid Bearer token required',
-          });
-          return;
-        }
-
-        if (!verifyApiKey(apiKey)) {
-          console.warn(`[Streamable HTTP] Rejected invalid API key: ${getTruncatedKey(apiKey)}`);
-          res.status(401).json({ error: 'Unauthorized: invalid API key' });
-          return;
-        }
-
-        // ── Dispatch ────────────────────────────────────────────────────────────
         if (req.method === 'POST') {
           await this.handlePost(req, res);
         } else if (req.method === 'GET') {
@@ -167,7 +149,6 @@ export class StreamableHttpServer {
       }
     };
 
-    // Health check endpoint (public, no auth)
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({
         status: 'healthy',
@@ -219,7 +200,51 @@ export class StreamableHttpServer {
     });
   }
 
+  private getRequestPrincipal(req: Request): string | null {
+    const authorization = req.headers.authorization;
+    const apiKey = extractApiKey(authorization);
+    if (apiKey && verifyApiKey(apiKey)) {
+      return `apikey:${apiKey}`;
+    }
+
+    const bearerToken = authorization?.startsWith('Bearer ')
+      ? authorization.slice('Bearer '.length).trim()
+      : '';
+    if (!bearerToken) {
+      return null;
+    }
+
+    const claims = verifyOAuthAccessToken(bearerToken);
+    if (!claims) {
+      return null;
+    }
+
+    return `oauth:${claims.sub}:${claims.client_id}`;
+  }
+
+  private ensureAuthenticated(req: Request, res: Response): string | null {
+    const principal = this.getRequestPrincipal(req);
+    if (!principal) {
+      const rawApiKey = extractApiKey(req.headers.authorization);
+      if (rawApiKey) {
+        console.warn(`[Streamable HTTP] Rejected invalid API key: ${getTruncatedKey(rawApiKey)}`);
+      }
+      res.setHeader('WWW-Authenticate', 'Bearer realm="musashi-mcp"');
+      res.status(401).json({
+        error: 'Unauthorized. Provide a valid API key or OAuth access token in Authorization: Bearer <token>.',
+      });
+      return null;
+    }
+
+    return principal;
+  }
+
   private async handlePost(req: Request, res: Response): Promise<void> {
+    const principal = this.ensureAuthenticated(req, res);
+    if (!principal) {
+      return;
+    }
+
     const protocolVersion = req.headers['mcp-protocol-version'] as string;
     if (!this.isValidProtocolVersion(protocolVersion)) {
       res.status(400).json({
@@ -229,7 +254,6 @@ export class StreamableHttpServer {
     }
 
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-
     const accept = req.headers['accept'] as string;
     if (!accept || (!accept.includes('application/json') && !accept.includes('text/event-stream'))) {
       res.status(400).json({
@@ -251,13 +275,22 @@ export class StreamableHttpServer {
       return;
     }
 
-    if (sessionId && !this.sessions.has(sessionId)) {
-      res.status(404).json({ error: 'Session not found or expired' });
-      return;
+    if (sessionId) {
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        res.status(404).json({ error: 'Session not found or expired' });
+        return;
+      }
+      if (session.principal !== principal) {
+        res.status(403).json({
+          error: 'Session does not belong to this authenticated principal',
+        });
+        return;
+      }
     }
 
     if ('method' in message && 'id' in message) {
-      await this.handleJsonRpcRequest(sessionId || null, message, req, res);
+      await this.handleJsonRpcRequest(sessionId || null, message, req, res, principal);
     } else if ('method' in message && !('id' in message)) {
       await this.handleJsonRpcNotification(sessionId || null, message, res);
     } else if ('result' in message || 'error' in message) {
@@ -268,8 +301,12 @@ export class StreamableHttpServer {
   }
 
   private async handleGet(req: Request, res: Response): Promise<void> {
-    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    const principal = this.ensureAuthenticated(req, res);
+    if (!principal) {
+      return;
+    }
 
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
     const accept = req.headers['accept'] as string;
     if (!accept || !accept.includes('text/event-stream')) {
       res.status(405).json({ error: 'Method Not Allowed. GET requires Accept: text/event-stream' });
@@ -284,6 +321,12 @@ export class StreamableHttpServer {
     const session = this.sessions.get(sessionId);
     if (!session) {
       res.status(404).json({ error: 'Session not found or expired' });
+      return;
+    }
+    if (session.principal !== principal) {
+      res.status(403).json({
+        error: 'Session does not belong to this authenticated principal',
+      });
       return;
     }
 
@@ -307,8 +350,12 @@ export class StreamableHttpServer {
   }
 
   private async handleDelete(req: Request, res: Response): Promise<void> {
-    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    const principal = this.ensureAuthenticated(req, res);
+    if (!principal) {
+      return;
+    }
 
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
     if (!sessionId) {
       res.status(400).json({ error: 'Mcp-Session-Id header required for DELETE requests' });
       return;
@@ -319,9 +366,19 @@ export class StreamableHttpServer {
       res.status(404).json({ error: 'Session not found or expired' });
       return;
     }
+    if (session.principal !== principal) {
+      res.status(403).json({
+        error: 'Session does not belong to this authenticated principal',
+      });
+      return;
+    }
 
     for (const stream of session.sseStreams) {
-      try { stream.end(); } catch { /* ignore */ }
+      try {
+        stream.end();
+      } catch {
+        // ignore
+      }
     }
 
     this.sessions.delete(sessionId);
@@ -333,12 +390,13 @@ export class StreamableHttpServer {
     sessionId: string | null,
     request: any,
     _req: Request,
-    res: Response
+    res: Response,
+    principal: string
   ): Promise<void> {
     try {
       if (request.method === 'initialize') {
         const result = await this.onRequest(null, request);
-        const newSessionId = this.createSession();
+        const newSessionId = this.createSession(principal);
         const session = this.sessions.get(newSessionId)!;
         session.initialized = true;
         res.setHeader('Mcp-Session-Id', newSessionId);
@@ -348,10 +406,11 @@ export class StreamableHttpServer {
       }
 
       const result = await this.onRequest(sessionId, request);
-
       if (sessionId) {
         const session = this.sessions.get(sessionId);
-        if (session) session.lastActivity = new Date();
+        if (session) {
+          session.lastActivity = new Date();
+        }
       }
 
       res.status(200).json(result);
@@ -401,7 +460,9 @@ export class StreamableHttpServer {
 
   sendMessage(sessionId: string, message: any): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session || session.sseStreams.size === 0) return false;
+    if (!session || session.sseStreams.size === 0) {
+      return false;
+    }
 
     const data = JSON.stringify(message);
     let sent = false;
@@ -418,11 +479,12 @@ export class StreamableHttpServer {
     return sent;
   }
 
-  private createSession(): string {
+  private createSession(principal: string): string {
     const sessionId = `mcp_${randomBytes(16).toString('hex')}`;
     const now = new Date();
     this.sessions.set(sessionId, {
       id: sessionId,
+      principal,
       createdAt: now,
       expiresAt: new Date(now.getTime() + this.SESSION_TTL_MS),
       sseStreams: new Set(),
@@ -433,13 +495,19 @@ export class StreamableHttpServer {
   }
 
   private isValidProtocolVersion(version: string | undefined): boolean {
-    if (!version) return true;
+    if (!version) {
+      return true;
+    }
     return version === SUPPORTED_PROTOCOL_VERSION || version === LEGACY_PROTOCOL_VERSION;
   }
 
   private isValidJsonRpcMessage(message: any): boolean {
-    if (!message || typeof message !== 'object') return false;
-    if (message.jsonrpc !== '2.0') return false;
+    if (!message || typeof message !== 'object') {
+      return false;
+    }
+    if (message.jsonrpc !== '2.0') {
+      return false;
+    }
     const hasMethod = 'method' in message;
     const hasResult = 'result' in message || 'error' in message;
     return hasMethod || hasResult;
@@ -452,10 +520,14 @@ export class StreamableHttpServer {
     for (const [sessionId, session] of this.sessions.entries()) {
       if (now > session.expiresAt) {
         for (const stream of session.sseStreams) {
-          try { stream.end(); } catch { /* ignore */ }
+          try {
+            stream.end();
+          } catch {
+            // ignore
+          }
         }
         this.sessions.delete(sessionId);
-        expiredCount++;
+        expiredCount += 1;
       }
     }
 
@@ -465,7 +537,9 @@ export class StreamableHttpServer {
   }
 
   private startCleanupJob(): void {
-    setInterval(() => this.cleanupExpiredSessions(), 5 * 60 * 1000);
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupExpiredSessions();
+    }, 5 * 60 * 1000);
   }
 
   async start(port: number): Promise<void> {
@@ -492,9 +566,17 @@ export class StreamableHttpServer {
     return new Promise((resolve) => {
       if (this.server) {
         console.log('[Streamable HTTP] Shutting down gracefully...');
+        if (this.cleanupInterval) {
+          clearInterval(this.cleanupInterval);
+          this.cleanupInterval = null;
+        }
         for (const session of this.sessions.values()) {
           for (const stream of session.sseStreams) {
-            try { stream.end(); } catch { /* ignore */ }
+            try {
+              stream.end();
+            } catch {
+              // ignore
+            }
           }
         }
         this.sessions.clear();
