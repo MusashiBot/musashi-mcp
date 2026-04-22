@@ -4,6 +4,15 @@
 
 It connects to `musashi-api` and makes these capabilities available over MCP:
 
+Musashi V1 market tools (clean JSON envelope, Kalshi-first, read-only):
+
+- `search_markets`
+- `get_market`
+- `get_market_history`
+- `get_market_resolution_context`
+
+Existing tools (kept for backward compatibility):
+
 - `analyze_text`
 - `get_arbitrage`
 - `get_movers`
@@ -19,9 +28,15 @@ It connects to `musashi-api` and makes these capabilities available over MCP:
 - `explain_market_move`
 - `get_health`
 
-Wallet and market context tool status:
+Tool backing:
 
-- `get_wallet_activity`, `get_wallet_positions`, `get_market_wallet_flow`, and `get_smart_money_markets` are backed by `musashi-api` endpoints.
+- The four V1 market tools return a `{ ok, data } | { ok, error }` JSON envelope defined in `docs/mcp-v1-prd-2026-04-22.md`. Error `type` is one of `not_found`, `invalid_input`, `upstream_unavailable`, `internal_error`.
+- V1 tools depend on these `musashi-api` endpoints:
+  - `GET /api/markets/search?query=...&limit=...&category=...&status=...`
+  - `GET /api/markets/lookup?market_id=...` or `?platform_id=...`
+  - `GET /api/markets/history?market_id=...&window=...&limit=...`
+  - `GET /api/markets/resolution-context?market_id=...`
+- `get_wallet_activity`, `get_wallet_positions`, `get_market_wallet_flow`, and `get_smart_money_markets` are backed by existing `musashi-api` endpoints.
 - `get_market_brief` and `explain_market_move` compose existing `musashi-api` primitives without direct market-source calls.
 
 ## Quick start
@@ -86,6 +101,10 @@ If the connection succeeds, ChatGPT should be able to discover and call Musashi 
 
 Once the app is connected, these are good smoke tests:
 
+- `Use the Musashi app to search markets for "Fed cuts".`
+- `Use the Musashi app to get the market musashi-kalshi-FEDCUT-2026SEP.`
+- `Use the Musashi app to get 7-day history for market musashi-kalshi-FEDCUT-2026SEP.`
+- `Use the Musashi app to get resolution context for market musashi-kalshi-FEDCUT-2026SEP.`
 - `Use the Musashi app to get health status.`
 - `Use the Musashi app to get feed statistics.`
 - `Use the Musashi app to list tracked feed accounts.`

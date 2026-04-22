@@ -6,7 +6,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { MusashiApiClient } from './clients/musashi-api.js';
 import { StreamableHttpServer } from './server/streamable-http-server.js';
+import { createV1Registry, type V1ToolRegistry } from './tools/v1-market-tools.js';
 
 const API_BASE_URL = (process.env.MUSASHI_API_BASE_URL || 'https://musashi-api.vercel.app').replace(/\/$/, '');
 const MCP_PROTOCOL_VERSION = '2025-06-18';
@@ -354,6 +356,7 @@ function isRecord(value: unknown): value is JsonRecord {
 class MusashiMcpServer {
   private readonly server: Server;
   private streamableHttpServer: StreamableHttpServer | null = null;
+  private readonly v1Tools: V1ToolRegistry;
 
   constructor() {
     this.server = new Server(
@@ -369,6 +372,9 @@ class MusashiMcpServer {
         },
       }
     );
+
+    const apiClient = new MusashiApiClient({ baseUrl: API_BASE_URL });
+    this.v1Tools = createV1Registry(apiClient);
 
     this.registerToolHandlers();
     this.registerProcessHandlers();
@@ -386,6 +392,7 @@ class MusashiMcpServer {
   private listTools(): JsonRecord {
     return {
       tools: [
+        ...this.v1Tools.definitions,
         {
           name: 'analyze_text',
           description:
@@ -679,6 +686,10 @@ class MusashiMcpServer {
 
   private async callTool(name: string, args: JsonRecord): Promise<JsonRecord> {
     try {
+      if (this.v1Tools.has(name)) {
+        return await this.v1Tools.call(name, args);
+      }
+
       switch (name) {
         case 'analyze_text':
           return await this.handleAnalyzeText(args);
