@@ -259,8 +259,9 @@ export class StreamableHttpServer {
     }
 
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    const accept = req.headers['accept'] as string;
-    if (!accept || (!accept.includes('application/json') && !accept.includes('text/event-stream'))) {
+    const acceptHeader = req.headers['accept'];
+    const accept = Array.isArray(acceptHeader) ? acceptHeader.join(', ') : acceptHeader;
+    if (!this.acceptsJsonOrEventStream(accept)) {
       res.status(400).json({
         error: 'Accept header must include application/json and/or text/event-stream',
       });
@@ -312,7 +313,8 @@ export class StreamableHttpServer {
     }
 
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    const accept = req.headers['accept'] as string;
+    const acceptHeader = req.headers['accept'];
+    const accept = Array.isArray(acceptHeader) ? acceptHeader.join(', ') : acceptHeader;
     if (!accept || !accept.includes('text/event-stream')) {
       res.status(405).json({ error: 'Method Not Allowed. GET requires Accept: text/event-stream' });
       return;
@@ -471,6 +473,7 @@ export class StreamableHttpServer {
 
     const data = JSON.stringify(message);
     let sent = false;
+    const failedStreams: Response[] = [];
 
     for (const stream of session.sseStreams) {
       try {
@@ -478,6 +481,16 @@ export class StreamableHttpServer {
         sent = true;
       } catch (error) {
         console.error(`[Streamable HTTP] Failed to send message to session ${sessionId}:`, error);
+        failedStreams.push(stream);
+      }
+    }
+
+    for (const stream of failedStreams) {
+      session.sseStreams.delete(stream);
+      try {
+        stream.end();
+      } catch {
+        // ignore cleanup errors
       }
     }
 
@@ -504,6 +517,18 @@ export class StreamableHttpServer {
       return true;
     }
     return version === SUPPORTED_PROTOCOL_VERSION || version === LEGACY_PROTOCOL_VERSION;
+  }
+
+  private acceptsJsonOrEventStream(accept?: string): boolean {
+    if (!accept) {
+      return true;
+    }
+
+    return (
+      accept.includes('application/json') ||
+      accept.includes('text/event-stream') ||
+      accept.includes('*/*')
+    );
   }
 
   private isValidJsonRpcMessage(message: any): boolean {

@@ -138,6 +138,55 @@ test('WWW-Authenticate uses configured public MCP metadata URL', async (t) => {
   );
 });
 
+test('Streamable MCP accepts POST requests with missing or wildcard Accept', async (t) => {
+  const port = 5750 + Math.floor(Math.random() * 200);
+  const child = spawn(process.execPath, ['dist/index.js', '--transport=http'], {
+    cwd: new URL('..', import.meta.url),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      MUSASHI_API_BASE_URL: 'http://127.0.0.1:3000',
+      MUSASHI_MCP_API_KEY: 'mcp_sk_auth_required_key',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  t.after(async () => {
+    await stopChildProcess(child);
+  });
+
+  await waitForHealth(`http://127.0.0.1:${port}/health`);
+
+  for (const acceptHeader of [undefined, '*/*']) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': '2025-06-18',
+      Authorization: 'Bearer mcp_sk_auth_required_key',
+    };
+    if (acceptHeader !== undefined) {
+      headers.Accept = acceptHeader;
+    }
+
+    const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'accept-test', version: '1.0.0' },
+        },
+      }),
+    });
+
+    assert.equal(response.status, 200, `Expected 200 for Accept=${String(acceptHeader)}`);
+    assert.ok(response.headers.get('mcp-session-id'), 'Expected Mcp-Session-Id header');
+  }
+});
+
 test('Streamable MCP sessions are bound to authenticated principal', async (t) => {
   const port = 5150 + Math.floor(Math.random() * 200);
   const child = spawn(process.execPath, ['dist/index.js', '--transport=http'], {
