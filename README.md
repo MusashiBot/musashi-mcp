@@ -130,6 +130,9 @@ pnpm install
 - `MUSASHI_MCP_PUBLIC_BASE_URL`: optional public MCP server base URL for OAuth metadata
 - `MUSASHI_MCP_API_KEY`: optional single valid MCP API key
 - `MCP_API_KEYS`: optional comma-separated list of valid MCP API keys
+- `MCP_OAUTH_TOKEN_SECRET`: secret for signing OAuth access tokens; if unset, a random secret is generated at startup and all tokens are invalidated on every server restart
+- `MCP_RATE_LIMIT_PER_MINUTE`: message rate limit per authenticated principal (default: 60)
+- `MCP_RATE_LIMIT_PER_HOUR`: hourly backstop per authenticated principal (default: 1000)
 
 Example local values:
 
@@ -193,14 +196,40 @@ Manual OAuth discovery check:
 curl http://127.0.0.1:3030/.well-known/oauth-authorization-server
 ```
 
-Manual authorization form check:
+Manual OAuth verification:
 
-```text
-http://127.0.0.1:3030/oauth/authorize?redirect_uri=http://127.0.0.1/callback&state=test-state
+```bash
+BASE=http://127.0.0.1:3030
+
+# 1. Register a public client
+CLIENT_JSON=$(curl -s -X POST "${BASE}/oauth/register" \
+  -H 'Content-Type: application/json' \
+  -d '{"redirect_uris":["http://127.0.0.1/callback"]}')
+CLIENT_ID=$(node -e "console.log(JSON.parse(process.argv[1]).client_id)" -- "${CLIENT_JSON}")
+
+# 2. Generate a PKCE S256 verifier and challenge
+VERIFIER=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")
+CHALLENGE=$(node -e \
+  "const c=require('crypto');process.stdout.write(c.createHash('sha256').update(process.argv[1]).digest('base64url'))" \
+  -- "${VERIFIER}")
+
+# 3. Open the authorization URL in a browser and submit a valid mcp_sk_... key
+# code_challenge_method is S256 by default and may be omitted
+echo "${BASE}/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=http://127.0.0.1/callback&state=test-state&code_challenge=${CHALLENGE}"
+
+# 4. After submitting the key, the browser redirects to:
+#    http://127.0.0.1/callback?code=AUTH_CODE&state=test-state
+#    Copy the code value from the URL, then run:
+read -rp "Paste auth code: " AUTH_CODE
+curl -s -X POST "${BASE}/oauth/token" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "grant_type=authorization_code&code=${AUTH_CODE}&client_id=${CLIENT_ID}&redirect_uri=http://127.0.0.1/callback&code_verifier=${VERIFIER}"
 ```
 
 ## Notes
 
-- OAuth authorization codes are stored in memory and expire automatically.
+- OAuth authorization codes and registered clients are stored in memory and cleared on every server restart.
+- OAuth PKCE: only `S256` is supported. Public clients (`token_endpoint_auth_method: none`) **must** provide `code_challenge`; omitting it returns a `400 invalid_request`. `code_challenge_method` may be omitted (defaults to S256) or set to `S256` explicitly; any other value is rejected.
+- Set `MCP_OAUTH_TOKEN_SECRET` to a stable value in production. Without it, all OAuth tokens are invalidated on every server restart.
 - `pnpm test` is a smoke suite, not a full MCP interoperability suite.
 - Behavior depends on a healthy and reachable `musashi-api`.

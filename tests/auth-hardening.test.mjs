@@ -245,19 +245,59 @@ test('token exchange succeeds with correct S256 code_verifier', async (t) => {
   assert.ok(body.access_token, 'Expected access_token in response');
 });
 
-test('token exchange succeeds with plain method', async (t) => {
+test('token exchange with plain method is rejected', async (t) => {
   const port = randomPort();
   const child = spawnServer(port);
   t.after(() => stopChild(child));
   const base = `http://127.0.0.1:${port}`;
   await waitForServer(`${base}/health`);
 
-  // plain: verifier === challenge
-  const verifier = crypto.randomBytes(32).toString('base64url');
-  const code = await getAuthCode(base, verifier, 'plain');
+  const clientId = await registerClient(base);
+  const verifier = 'plain-test-verifier';
 
-  const res = await exchangeToken(base, code, verifier);
-  assert.equal(res.status, 200, 'Expected 200 for correct plain verifier');
-  const body = await res.json();
-  assert.equal(body.token_type, 'Bearer');
+  const authorizeParams = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: REDIRECT_URI,
+    state: 'test-state',
+    code_challenge: verifier,
+    code_challenge_method: 'plain',
+    api_key: VALID_KEY,
+  });
+  const authorizeRes = await fetch(`${base}/oauth/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: authorizeParams.toString(),
+    redirect: 'manual',
+  });
+  assert.equal(authorizeRes.status, 400, 'Expected 400 for plain code_challenge_method');
+  const body = await authorizeRes.json();
+  assert.equal(body.error, 'invalid_request');
+});
+
+test('authorization fails without code_challenge for public client', async (t) => {
+  const port = randomPort();
+  const child = spawnServer(port);
+  t.after(() => stopChild(child));
+  const base = `http://127.0.0.1:${port}`;
+  await waitForServer(`${base}/health`);
+
+  const clientId = await registerClient(base);
+
+  const authorizeParams = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: REDIRECT_URI,
+    state: 'test-state',
+    api_key: VALID_KEY,
+    // no code_challenge
+  });
+  const authorizeRes = await fetch(`${base}/oauth/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: authorizeParams.toString(),
+    redirect: 'manual',
+  });
+  assert.equal(authorizeRes.status, 400, 'Expected 400 when code_challenge is missing for public client');
+  const body = await authorizeRes.json();
+  assert.equal(body.error, 'invalid_request');
+  assert.ok(body.error_description.includes('PKCE'), 'Expected error_description to mention PKCE');
 });

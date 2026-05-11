@@ -10,8 +10,8 @@ import { extractApiKey } from '../transports/auth.js';
 /**
  * Rate limit configuration from environment variables
  */
-const RATE_LIMIT_PER_MINUTE = parseInt(process.env.MCP_RATE_LIMIT_PER_MINUTE || '60', 10);
-const RATE_LIMIT_PER_HOUR = parseInt(process.env.MCP_RATE_LIMIT_PER_HOUR || '1000', 10);
+export const RATE_LIMIT_PER_MINUTE = parseInt(process.env.MCP_RATE_LIMIT_PER_MINUTE || '60', 10);
+export const RATE_LIMIT_PER_HOUR = parseInt(process.env.MCP_RATE_LIMIT_PER_HOUR || '1000', 10);
 
 /**
  * Session creation rate limiter
@@ -163,3 +163,17 @@ class SSELimiter {
 }
 
 export const sseLimiter = new SSELimiter();
+
+export const oauthRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || 'anonymous',
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: 'Too many OAuth requests. Try again later.',
+      retry_after_seconds: 60,
+    });
+  },
+});

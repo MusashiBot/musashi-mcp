@@ -3,12 +3,12 @@ import crypto from 'crypto';
 import { verifyApiKey } from '../transports/auth.js';
 
 interface AuthorizationCodeRecord {
-  apiKey: string;
+  sub: string;
   clientId?: string;
   redirectUri: string;
   expiresAt: number;
   codeChallenge?: string;
-  codeChallengeMethod?: 'S256' | 'plain';
+  codeChallengeMethod?: 'S256';
 }
 
 interface OAuthClientRecord {
@@ -34,16 +34,17 @@ const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const accessTokenSecret = process.env.MCP_OAUTH_TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
 
+if (!process.env.MCP_OAUTH_TOKEN_SECRET) {
+  console.warn('[OAuth] MCP_OAUTH_TOKEN_SECRET not set; OAuth access tokens will be invalidated on every server restart');
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [code, record] of authCodes.entries()) {
     if (record.expiresAt < now) authCodes.delete(code);
   }
-}, 60_000);
+}, 60_000).unref();
 
-function isSupportedCodeChallengeMethod(value: string): value is 'S256' | 'plain' {
-  return value === 'S256' || value === 'plain';
-}
 
 function getRegisteredClient(clientId: string | undefined): OAuthClientRecord | null {
   if (!clientId) {
@@ -69,10 +70,10 @@ function buildApiKeySubject(apiKey: string): string {
   return crypto.createHash('sha256').update(apiKey).digest('hex');
 }
 
-function issueAccessToken(apiKey: string, clientId: string): { token: string; expiresIn: number } {
+function issueAccessToken(sub: string, clientId: string): { token: string; expiresIn: number } {
   const now = Math.floor(Date.now() / 1000);
   const claims: AccessTokenClaims = {
-    sub: buildApiKeySubject(apiKey),
+    sub,
     client_id: clientId,
     scope: 'mcp:read mcp:write',
     iat: now,
@@ -224,7 +225,7 @@ export function handleOAuthDiscovery(req: Request, res: Response): void {
     registration_endpoint: `${baseUrl}/oauth/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code'],
-    code_challenge_methods_supported: ['S256', 'plain'],
+    code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
   });
 }
@@ -303,12 +304,14 @@ export function handleOAuthAuthorize(req: Request, res: Response): void {
         ? req.body.code_challenge_method
         : '';
 
-  const codeChallengeMethod: 'S256' | 'plain' =
-    rawCodeChallengeMethod === ''
-      ? 'plain'
-      : rawCodeChallengeMethod === 'plain'
-        ? 'plain'
-        : 'S256';
+  const codeChallengeMethod = 'S256' as const;
+  if (rawCodeChallengeMethod && rawCodeChallengeMethod !== 'S256') {
+    res.status(400).json({
+      error: 'invalid_request',
+      error_description: 'Unsupported code_challenge_method. Only S256 is supported.',
+    });
+    return;
+  }
 
   if (!clientId || !redirectUri || !state) {
     res.status(400).json({
@@ -343,14 +346,10 @@ export function handleOAuthAuthorize(req: Request, res: Response): void {
     return;
   }
 
-  if (
-    codeChallenge &&
-    rawCodeChallengeMethod &&
-    !isSupportedCodeChallengeMethod(rawCodeChallengeMethod)
-  ) {
+  if (client.tokenEndpointAuthMethod === 'none' && !codeChallenge) {
     res.status(400).json({
       error: 'invalid_request',
-      error_description: 'Unsupported code_challenge_method',
+      error_description: 'PKCE is required for public clients. Provide code_challenge with method S256.',
     });
     return;
   }
@@ -374,7 +373,7 @@ export function handleOAuthAuthorize(req: Request, res: Response): void {
 
     const code = `auth_${crypto.randomBytes(32).toString('hex')}`;
     authCodes.set(code, {
-      apiKey,
+      sub: buildApiKeySubject(apiKey),
       clientId,
       redirectUri,
       expiresAt: Date.now() + AUTH_CODE_TTL_MS,
@@ -485,10 +484,7 @@ export function handleOAuthToken(req: Request, res: Response): void {
       return;
     }
 
-    const challenge =
-      authData.codeChallengeMethod === 'plain'
-        ? codeVerifier
-        : crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     if (challenge !== authData.codeChallenge) {
       res.status(400).json({
         error: 'invalid_grant',
@@ -499,7 +495,7 @@ export function handleOAuthToken(req: Request, res: Response): void {
   }
 
   authCodes.delete(code);
-  const accessToken = issueAccessToken(authData.apiKey, client.clientId);
+  const accessToken = issueAccessToken(authData.sub, client.clientId);
 
   res.json({
     access_token: accessToken.token,

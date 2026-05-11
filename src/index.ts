@@ -154,7 +154,8 @@ interface MarketContext {
 }
 
 async function fetchJson(path: string, init?: RequestInit): Promise<JsonRecord> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  const signal = AbortSignal.timeout(30_000);
+  const response = await fetch(`${API_BASE_URL}${path}`, { signal, ...init });
   const text = await response.text();
 
   let payload: JsonRecord = {};

@@ -6,8 +6,9 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
-import { randomBytes } from 'crypto';
-import { hourlyRateLimiter } from './rate-limiter.js';
+import { randomBytes, createHash } from 'crypto';
+import { oauthRateLimiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR } from './rate-limiter.js';
+import rateLimit from 'express-rate-limit';
 import {
   handleOAuthAuthorize,
   handleOAuthDiscovery,
@@ -21,6 +22,8 @@ import { extractApiKey, verifyApiKey, getTruncatedKey } from '../transports/auth
 
 const SUPPORTED_PROTOCOL_VERSION = '2025-06-18';
 const LEGACY_PROTOCOL_VERSION = '2025-03-26';
+const MAX_SSE_STREAMS_PER_SESSION = 25;
+const MAX_SSE_STREAMS_PER_PRINCIPAL = 10;
 
 interface Session {
   id: string;
@@ -42,23 +45,23 @@ export interface StreamableHttpServerOptions {
 export class StreamableHttpServer {
   private app: express.Application;
   private server: any;
-  private sessions: Map<string, Session> = new Map();
+  /** @internal */ sessions: Map<string, Session> = new Map();
   private onRequest: (sessionId: string | null, request: any) => Promise<any>;
   private onNotification: (sessionId: string | null, notification: any) => Promise<void>;
   private onResponse: (sessionId: string | null, response: any) => Promise<void>;
   private readonly SESSION_TTL_MS = 30 * 60 * 1000;
   private cleanupInterval: NodeJS.Timeout | null = null;
+  /** @internal */ sseStreamsByPrincipal: Map<string, number> = new Map();
 
   constructor(options: StreamableHttpServerOptions) {
     this.app = express();
-    this.app.set('trust proxy', true);
+    this.app.set('trust proxy', 1);
     this.onRequest = options.onRequest;
     this.onNotification = options.onNotification;
     this.onResponse = options.onResponse;
 
     this.setupMiddleware();
     this.setupRoutes();
-    this.startCleanupJob();
   }
 
   private setupMiddleware(): void {
@@ -69,8 +72,9 @@ export class StreamableHttpServer {
       'https://claude.ai',
       'https://www.claude.ai',
       'https://api.anthropic.com',
-      'http://localhost:3000',
-      'http://localhost:5173',
+      ...(process.env.NODE_ENV !== 'production'
+        ? ['http://localhost:3000', 'http://localhost:5173']
+        : []),
     ];
 
     const corsMiddleware = cors({
@@ -90,13 +94,7 @@ export class StreamableHttpServer {
       exposedHeaders: ['Mcp-Session-Id'],
     });
 
-    this.app.use((req: Request, res: Response, next: NextFunction) => {
-      if (req.path === '/oauth/authorize') {
-        next();
-        return;
-      }
-      corsMiddleware(req, res, next);
-    });
+    this.app.use(corsMiddleware);
 
     this.app.use(express.json());
     this.app.use(express.urlencoded({ extended: true }));
@@ -107,10 +105,81 @@ export class StreamableHttpServer {
       next();
     });
 
-    this.app.use(hourlyRateLimiter);
   }
 
   private setupRoutes(): void {
+    const principalKey = (req: Request): string =>
+      this.getRequestPrincipal(req) ?? req.ip ?? 'anonymous';
+
+    const hourlyLimiter = rateLimit({
+      windowMs: 60 * 60 * 1000,
+      max: RATE_LIMIT_PER_HOUR,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: principalKey,
+      skip: (req: Request) => {
+        if (req.method !== 'GET') return false;
+        const sessionId = req.headers['mcp-session-id'];
+        const accept = req.headers['accept'] as string | undefined;
+        return !sessionId && (!accept || !accept.includes('text/event-stream'));
+      },
+      handler: (_req, res) => {
+        res.status(429).json({
+          error: `Rate limit exceeded. Max ${RATE_LIMIT_PER_HOUR} requests per hour.`,
+          retry_after_seconds: 3600,
+        });
+      },
+    });
+
+    const sessionBurstLimiter = rateLimit({
+      windowMs: 60 * 1000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: principalKey,
+      handler: (_req, res) => {
+        res.status(429).json({ error: 'Session creation rate limit exceeded. Max 5 per minute.' });
+      },
+    });
+
+    const sessionHourlyLimiter = rateLimit({
+      windowMs: 60 * 60 * 1000,
+      max: 30,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: principalKey,
+      handler: (_req, res) => {
+        res.status(429).json({ error: 'Session creation rate limit exceeded. Max 30 per hour.' });
+      },
+    });
+
+    const messageLimiter = rateLimit({
+      windowMs: 60 * 1000,
+      max: RATE_LIMIT_PER_MINUTE,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: principalKey,
+      handler: (_req, res) => {
+        res.status(429).json({
+          error: `Message rate limit exceeded. Max ${RATE_LIMIT_PER_MINUTE} per minute.`,
+        });
+      },
+    });
+
+    const mcpLimiter: express.RequestHandler = (req, res, next) => {
+      if (req.method !== 'POST') return next();
+      if (req.body?.method === 'initialize') {
+        return sessionBurstLimiter(req, res, (err?: unknown) => {
+          if (err) return next(err);
+          sessionHourlyLimiter(req, res, (err2?: unknown) => {
+            if (err2) return next(err2);
+            messageLimiter(req, res, next);
+          });
+        });
+      }
+      return messageLimiter(req, res, next);
+    };
+
     const handleMcpRoute = async (req: Request, res: Response) => {
       try {
         if (req.method === 'GET') {
@@ -166,12 +235,12 @@ export class StreamableHttpServer {
     this.app.get('/.well-known/oauth-authorization-server', handleOAuthDiscovery);
     this.app.get('/.well-known/oauth-protected-resource', handleOAuthProtectedResourceMetadata);
     this.app.get('/oauth/authorize', handleOAuthAuthorize);
-    this.app.post('/oauth/authorize', handleOAuthAuthorize);
-    this.app.post('/oauth/register', handleOAuthRegister);
-    this.app.post('/oauth/token', handleOAuthToken);
+    this.app.post('/oauth/authorize', oauthRateLimiter, handleOAuthAuthorize);
+    this.app.post('/oauth/register', oauthRateLimiter, handleOAuthRegister);
+    this.app.post('/oauth/token', oauthRateLimiter, handleOAuthToken);
 
-    this.app.all('/', handleMcpRoute);
-    this.app.all('/mcp', handleMcpRoute);
+    this.app.all('/', hourlyLimiter, mcpLimiter, handleMcpRoute);
+    this.app.all('/mcp', hourlyLimiter, mcpLimiter, handleMcpRoute);
 
     this.app.use((_req: Request, res: Response) => {
       res.status(404).json({
@@ -201,11 +270,31 @@ export class StreamableHttpServer {
     });
   }
 
+  private hashApiKey(key: string): string {
+    return createHash('sha256').update(key).digest('hex').slice(0, 16);
+  }
+
+  private registerSseStream(principal: string): void {
+    this.sseStreamsByPrincipal.set(
+      principal,
+      (this.sseStreamsByPrincipal.get(principal) ?? 0) + 1,
+    );
+  }
+
+  private unregisterSseStream(principal: string): void {
+    const count = this.sseStreamsByPrincipal.get(principal) ?? 0;
+    if (count <= 1) {
+      this.sseStreamsByPrincipal.delete(principal);
+    } else {
+      this.sseStreamsByPrincipal.set(principal, count - 1);
+    }
+  }
+
   private getRequestPrincipal(req: Request): string | null {
     const authorization = req.headers.authorization;
     const apiKey = extractApiKey(authorization);
     if (apiKey && verifyApiKey(apiKey)) {
-      return `apikey:${apiKey}`;
+      return `apikey:${this.hashApiKey(apiKey)}`;
     }
 
     const bearerToken = authorization?.startsWith('Bearer ')
@@ -259,10 +348,11 @@ export class StreamableHttpServer {
     }
 
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    const accept = req.headers['accept'] as string;
-    if (!accept || (!accept.includes('application/json') && !accept.includes('text/event-stream'))) {
+    const acceptHeader = req.headers['accept'];
+    const accept = Array.isArray(acceptHeader) ? acceptHeader.join(', ') : acceptHeader;
+    if (!this.acceptsJsonOrEventStream(accept)) {
       res.status(400).json({
-        error: 'Accept header must include application/json and/or text/event-stream',
+        error: 'Accept header must be application/json, text/event-stream, or */*',
       });
       return;
     }
@@ -312,7 +402,8 @@ export class StreamableHttpServer {
     }
 
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    const accept = req.headers['accept'] as string;
+    const acceptHeader = req.headers['accept'];
+    const accept = Array.isArray(acceptHeader) ? acceptHeader.join(', ') : acceptHeader;
     if (!accept || !accept.includes('text/event-stream')) {
       res.status(405).json({ error: 'Method Not Allowed. GET requires Accept: text/event-stream' });
       return;
@@ -335,11 +426,24 @@ export class StreamableHttpServer {
       return;
     }
 
+    const principalStreams = this.sseStreamsByPrincipal.get(session.principal) ?? 0;
+    if (principalStreams >= MAX_SSE_STREAMS_PER_PRINCIPAL) {
+      res.status(429).json({ error: 'Too many concurrent SSE streams for this principal' });
+      return;
+    }
+
+    if (session.sseStreams.size >= MAX_SSE_STREAMS_PER_SESSION) {
+      res.status(429).json({ error: 'Too many SSE streams for this session' });
+      return;
+    }
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
 
+    this.registerSseStream(session.principal);
     session.sseStreams.add(res);
     console.log(`[Streamable HTTP] Opened SSE stream for session ${sessionId} (${session.sseStreams.size} total)`);
 
@@ -349,7 +453,10 @@ export class StreamableHttpServer {
 
     req.on('close', () => {
       clearInterval(keepaliveInterval);
-      session.sseStreams.delete(res);
+      if (session.sseStreams.has(res)) {
+        session.sseStreams.delete(res);
+        this.unregisterSseStream(session.principal);
+      }
       console.log(`[Streamable HTTP] Closed SSE stream for session ${sessionId} (${session.sseStreams.size} remaining)`);
     });
   }
@@ -378,7 +485,12 @@ export class StreamableHttpServer {
       return;
     }
 
-    for (const stream of session.sseStreams) {
+    const streamsToClose = [...session.sseStreams];
+    session.sseStreams.clear();
+    this.sessions.delete(sessionId);
+
+    for (const stream of streamsToClose) {
+      this.unregisterSseStream(session.principal);
       try {
         stream.end();
       } catch {
@@ -386,7 +498,6 @@ export class StreamableHttpServer {
       }
     }
 
-    this.sessions.delete(sessionId);
     console.log(`[Streamable HTTP] Terminated session ${sessionId}`);
     res.status(200).json({ success: true });
   }
@@ -471,6 +582,7 @@ export class StreamableHttpServer {
 
     const data = JSON.stringify(message);
     let sent = false;
+    const failedStreams: Response[] = [];
 
     for (const stream of session.sseStreams) {
       try {
@@ -478,6 +590,19 @@ export class StreamableHttpServer {
         sent = true;
       } catch (error) {
         console.error(`[Streamable HTTP] Failed to send message to session ${sessionId}:`, error);
+        failedStreams.push(stream);
+      }
+    }
+
+    for (const stream of failedStreams) {
+      if (session.sseStreams.has(stream)) {
+        session.sseStreams.delete(stream);
+        this.unregisterSseStream(session.principal);
+      }
+      try {
+        stream.end();
+      } catch {
+        // ignore cleanup errors
       }
     }
 
@@ -506,6 +631,18 @@ export class StreamableHttpServer {
     return version === SUPPORTED_PROTOCOL_VERSION || version === LEGACY_PROTOCOL_VERSION;
   }
 
+  private acceptsJsonOrEventStream(accept?: string): boolean {
+    if (!accept) {
+      return true;
+    }
+
+    return (
+      accept.includes('application/json') ||
+      accept.includes('text/event-stream') ||
+      accept.includes('*/*')
+    );
+  }
+
   private isValidJsonRpcMessage(message: any): boolean {
     if (!message || typeof message !== 'object') {
       return false;
@@ -524,15 +661,19 @@ export class StreamableHttpServer {
 
     for (const [sessionId, session] of this.sessions.entries()) {
       if (now > session.expiresAt) {
-        for (const stream of session.sseStreams) {
+        const streamsToClose = [...session.sseStreams];
+        session.sseStreams.clear();
+        this.sessions.delete(sessionId);
+        expiredCount += 1;
+
+        for (const stream of streamsToClose) {
+          this.unregisterSseStream(session.principal);
           try {
             stream.end();
           } catch {
             // ignore
           }
         }
-        this.sessions.delete(sessionId);
-        expiredCount += 1;
       }
     }
 
@@ -548,6 +689,7 @@ export class StreamableHttpServer {
   }
 
   async start(port: number): Promise<void> {
+    this.startCleanupJob();
     return new Promise((resolve, reject) => {
       try {
         this.server = this.app.listen(port, '0.0.0.0', () => {
@@ -568,31 +710,34 @@ export class StreamableHttpServer {
   }
 
   async stop(): Promise<void> {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+    for (const session of this.sessions.values()) {
+      for (const stream of session.sseStreams) {
+        try {
+          stream.end();
+        } catch {
+          // ignore
+        }
+      }
+    }
+    this.sessions.clear();
+    this.sseStreamsByPrincipal.clear();
+
     return new Promise((resolve) => {
       if (this.server) {
         console.log('[Streamable HTTP] Shutting down gracefully...');
-        if (this.cleanupInterval) {
-          clearInterval(this.cleanupInterval);
-          this.cleanupInterval = null;
-        }
-        for (const session of this.sessions.values()) {
-          for (const stream of session.sseStreams) {
-            try {
-              stream.end();
-            } catch {
-              // ignore
-            }
-          }
-        }
-        this.sessions.clear();
-        this.server.close(() => {
-          console.log('[Streamable HTTP] Server closed');
-          resolve();
-        });
-        setTimeout(() => {
+        const forceClose = setTimeout(() => {
           console.log('[Streamable HTTP] Force closing server');
           resolve();
         }, 5000);
+        this.server.close(() => {
+          clearTimeout(forceClose);
+          console.log('[Streamable HTTP] Server closed');
+          resolve();
+        });
       } else {
         resolve();
       }

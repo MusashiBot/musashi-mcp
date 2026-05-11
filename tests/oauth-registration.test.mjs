@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+
+const TEST_VERIFIER = 'plain-verifier';
+const TEST_CHALLENGE = crypto.createHash('sha256').update(TEST_VERIFIER).digest('base64url');
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,8 +114,8 @@ test('OAuth register creates a public client and token exchange requires PKCE ve
     client_id: client.client_id,
     redirect_uri: 'https://chatgpt.com/connector/oauth/callback',
     state: 'state-form',
-    code_challenge: 'plain-verifier',
-    code_challenge_method: 'plain',
+    code_challenge: TEST_CHALLENGE,
+    code_challenge_method: 'S256',
   })}`);
   assert.equal(authorizeFormResponse.status, 200);
   const authorizeFormHtml = await authorizeFormResponse.text();
@@ -121,8 +125,8 @@ test('OAuth register creates a public client and token exchange requires PKCE ve
     client_id: client.client_id,
     redirect_uri: 'https://chatgpt.com/connector/oauth/callback',
     state: 'state-123',
-    code_challenge: 'plain-verifier',
-    code_challenge_method: 'plain',
+    code_challenge: TEST_CHALLENGE,
+    code_challenge_method: 'S256',
     api_key: 'mcp_sk_test_oauth_key',
   });
 
@@ -193,8 +197,8 @@ test('OAuth token exchange succeeds for registered public clients with matching 
       client_id: client.client_id,
       redirect_uri: 'https://chatgpt.com/connector/oauth/callback',
       state: 'state-456',
-      code_challenge: 'plain-verifier',
-      code_challenge_method: 'plain',
+      code_challenge: TEST_CHALLENGE,
+      code_challenge_method: 'S256',
       api_key: 'mcp_sk_test_oauth_key',
     }),
     redirect: 'manual',
