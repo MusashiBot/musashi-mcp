@@ -130,9 +130,21 @@ pnpm install
 - `MUSASHI_MCP_PUBLIC_BASE_URL`: optional public MCP server base URL for OAuth metadata
 - `MUSASHI_MCP_API_KEY`: optional single valid MCP API key
 - `MCP_API_KEYS`: optional comma-separated list of valid MCP API keys
-- `MCP_OAUTH_TOKEN_SECRET`: secret for signing OAuth access tokens; if unset, a random secret is generated at startup and all tokens are invalidated on every server restart
+- `MCP_OAUTH_TOKEN_SECRET`: **required in production** — secret for signing OAuth access tokens; without it, a random secret is generated at startup and all tokens are invalidated on every server restart
+- `UPSTASH_REDIS_REST_URL`: **required in production** — Upstash Redis REST URL for shared OAuth state
+- `UPSTASH_REDIS_REST_TOKEN`: **required in production** — Upstash Redis REST token
 - `MCP_RATE_LIMIT_PER_MINUTE`: message rate limit per authenticated principal (default: 60)
 - `MCP_RATE_LIMIT_PER_HOUR`: hourly backstop per authenticated principal (default: 1000)
+
+**Production requirements** (HTTP transport, Railway or `NODE_ENV=production`):
+
+`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and `MCP_OAUTH_TOKEN_SECRET` must all be set or the server exits with code 1 at startup. Without shared KV, registered OAuth clients and auth codes are process-local and lost on every restart, breaking GPT/Claude reconnects.
+
+**Token lifecycle:**
+
+- Access tokens expire after 1 hour.
+- Refresh tokens expire after 30 days. When a refresh token is used, it is rotated — the old token is consumed and a new token is issued. If a consumed token is replayed, the entire token family is revoked and the user must re-authenticate.
+- When the refresh token expires, the user must complete the OAuth flow again.
 
 Example local values:
 
@@ -228,8 +240,10 @@ curl -s -X POST "${BASE}/oauth/token" \
 
 ## Notes
 
-- OAuth authorization codes and registered clients are stored in memory and cleared on every server restart.
-- OAuth PKCE: only `S256` is supported. Public clients (`token_endpoint_auth_method: none`) **must** provide `code_challenge`; omitting it returns a `400 invalid_request`. `code_challenge_method` may be omitted (defaults to S256) or set to `S256` explicitly; any other value is rejected.
+- **Breaking release**: this version invalidates all existing OAuth sessions and registered connector state. GPT/Claude users must reconnect once after deployment. There is no migration path.
+- OAuth PKCE: only `S256` is supported. All clients are public (`token_endpoint_auth_method: none`) and **must** provide `code_challenge`; omitting it returns a `400 invalid_request`. `code_challenge_method` may be omitted (defaults to S256) or set to `S256` explicitly; any other value is rejected. `client_secret_post` is not supported.
+- Production requires shared KV (`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`). Without it, registered OAuth clients and auth codes are per-process and lost on every restart. The in-memory store is for local development only.
 - Set `MCP_OAUTH_TOKEN_SECRET` to a stable value in production. Without it, all OAuth tokens are invalidated on every server restart.
+- Session continuity: once the KV store is configured and the server is deployed, connector registrations and sessions survive service restarts. Users only need to reconnect once when first deploying this version.
 - `pnpm test` is a smoke suite, not a full MCP interoperability suite.
 - Behavior depends on a healthy and reachable `musashi-api`.

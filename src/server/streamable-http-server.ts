@@ -10,14 +10,12 @@ import { randomBytes, createHash } from 'crypto';
 import { oauthRateLimiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR } from './rate-limiter.js';
 import rateLimit from 'express-rate-limit';
 import {
-  handleOAuthAuthorize,
-  handleOAuthDiscovery,
-  handleOAuthProtectedResourceMetadata,
-  handleOAuthRegister,
-  handleOAuthToken,
+  createOAuthHandlers,
   getPublicBaseUrl,
   verifyOAuthAccessToken,
+  type OAuthHandlers,
 } from './oauth-handler.js';
+import { MemoryOAuthStore, type OAuthStore } from './oauth-store.js';
 import { extractApiKey, verifyApiKey, getTruncatedKey } from '../transports/auth.js';
 
 const SUPPORTED_PROTOCOL_VERSION = '2025-06-18';
@@ -40,6 +38,7 @@ export interface StreamableHttpServerOptions {
   onRequest: (sessionId: string | null, request: any) => Promise<any>;
   onNotification: (sessionId: string | null, notification: any) => Promise<void>;
   onResponse: (sessionId: string | null, response: any) => Promise<void>;
+  oauthStore?: OAuthStore;
 }
 
 export class StreamableHttpServer {
@@ -52,6 +51,7 @@ export class StreamableHttpServer {
   private readonly SESSION_TTL_MS = 30 * 60 * 1000;
   private cleanupInterval: NodeJS.Timeout | null = null;
   /** @internal */ sseStreamsByPrincipal: Map<string, number> = new Map();
+  private oauthHandlers: OAuthHandlers;
 
   constructor(options: StreamableHttpServerOptions) {
     this.app = express();
@@ -60,24 +60,47 @@ export class StreamableHttpServer {
     this.onNotification = options.onNotification;
     this.onResponse = options.onResponse;
 
+    const isProduction =
+      process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_SERVICE_NAME);
+    if (!options.oauthStore && isProduction) {
+      throw new Error('[OAuth] oauthStore is required in production. Pass an initialized OAuthStore via options.');
+    }
+    const resolvedStore = options.oauthStore ?? new MemoryOAuthStore();
+    this.oauthHandlers = createOAuthHandlers(resolvedStore);
+
     this.setupMiddleware();
     this.setupRoutes();
   }
 
   private setupMiddleware(): void {
+    this.app.use(express.json());
+    this.app.use(express.urlencoded({ extended: true }));
+
+    this.app.use((req: Request, _res: Response, next: NextFunction) => {
+      const sessionId = req.headers['mcp-session-id'] || 'none';
+      console.log(`[Streamable HTTP] ${req.method} ${req.path} - Session: ${sessionId}`);
+      next();
+    });
+
+  }
+
+  private setupRoutes(): void {
+    const openCors = cors({ origin: '*', credentials: false });
+
     const ALLOWED_ORIGINS = [
       'https://chatgpt.com',
       'https://www.chatgpt.com',
       'https://chat.openai.com',
       'https://claude.ai',
       'https://www.claude.ai',
+      'https://app.claude.ai',
       'https://api.anthropic.com',
       ...(process.env.NODE_ENV !== 'production'
         ? ['http://localhost:3000', 'http://localhost:5173']
         : []),
     ];
 
-    const corsMiddleware = cors({
+    const strictCors = cors({
       origin: (origin, callback) => {
         if (!origin) {
           callback(null, true);
@@ -94,20 +117,6 @@ export class StreamableHttpServer {
       exposedHeaders: ['Mcp-Session-Id'],
     });
 
-    this.app.use(corsMiddleware);
-
-    this.app.use(express.json());
-    this.app.use(express.urlencoded({ extended: true }));
-
-    this.app.use((req: Request, _res: Response, next: NextFunction) => {
-      const sessionId = req.headers['mcp-session-id'] || 'none';
-      console.log(`[Streamable HTTP] ${req.method} ${req.path} - Session: ${sessionId}`);
-      next();
-    });
-
-  }
-
-  private setupRoutes(): void {
     const principalKey = (req: Request): string =>
       this.getRequestPrincipal(req) ?? req.ip ?? 'anonymous';
 
@@ -219,7 +228,7 @@ export class StreamableHttpServer {
       }
     };
 
-    this.app.get('/health', (_req: Request, res: Response) => {
+    this.app.get('/health', openCors, (_req: Request, res: Response) => {
       res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
@@ -232,15 +241,18 @@ export class StreamableHttpServer {
       });
     });
 
-    this.app.get('/.well-known/oauth-authorization-server', handleOAuthDiscovery);
-    this.app.get('/.well-known/oauth-protected-resource', handleOAuthProtectedResourceMetadata);
-    this.app.get('/oauth/authorize', handleOAuthAuthorize);
-    this.app.post('/oauth/authorize', oauthRateLimiter, handleOAuthAuthorize);
-    this.app.post('/oauth/register', oauthRateLimiter, handleOAuthRegister);
-    this.app.post('/oauth/token', oauthRateLimiter, handleOAuthToken);
+    this.app.get('/.well-known/oauth-authorization-server', openCors, this.oauthHandlers.handleOAuthDiscovery);
+    this.app.get('/.well-known/oauth-protected-resource', openCors, this.oauthHandlers.handleOAuthProtectedResourceMetadata);
+    this.app.options('/oauth/authorize', openCors);
+    this.app.options('/oauth/register', openCors);
+    this.app.options('/oauth/token', openCors);
+    this.app.get('/oauth/authorize', openCors, this.oauthHandlers.handleOAuthAuthorize);
+    this.app.post('/oauth/authorize', openCors, oauthRateLimiter, this.oauthHandlers.handleOAuthAuthorize);
+    this.app.post('/oauth/register', openCors, oauthRateLimiter, this.oauthHandlers.handleOAuthRegister);
+    this.app.post('/oauth/token', openCors, oauthRateLimiter, this.oauthHandlers.handleOAuthToken);
 
-    this.app.all('/', hourlyLimiter, mcpLimiter, handleMcpRoute);
-    this.app.all('/mcp', hourlyLimiter, mcpLimiter, handleMcpRoute);
+    this.app.all('/', strictCors, hourlyLimiter, mcpLimiter, handleMcpRoute);
+    this.app.all('/mcp', strictCors, hourlyLimiter, mcpLimiter, handleMcpRoute);
 
     this.app.use((_req: Request, res: Response) => {
       res.status(404).json({

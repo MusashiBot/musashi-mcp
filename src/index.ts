@@ -7,6 +7,8 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHttpServer } from './server/streamable-http-server.js';
+import { MemoryOAuthStore, type OAuthStore } from './server/oauth-store.js';
+import { KvOAuthStore } from './server/kv-oauth-store.js';
 
 const API_BASE_URL = (process.env.MUSASHI_API_BASE_URL || 'https://musashi-api.vercel.app').replace(/\/$/, '');
 const MCP_PROTOCOL_VERSION = '2025-06-18';
@@ -1440,9 +1442,10 @@ class MusashiMcpServer {
     await this.server.connect(transport);
   }
 
-  async startHttp(port: number): Promise<void> {
+  async startHttp(port: number, oauthStore: OAuthStore): Promise<void> {
     this.streamableHttpServer = new StreamableHttpServer({
       port,
+      oauthStore,
       onRequest: async (_sessionId: string | null, request: JsonRecord) => {
         return await this.handleJsonRpcRequest(request);
       },
@@ -1528,14 +1531,43 @@ class MusashiMcpServer {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const transportType = args.includes('--transport=http') ? 'http' : 'stdio';
-  const server = new MusashiMcpServer();
 
   if (transportType === 'http') {
+    const isProduction =
+      process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_SERVICE_NAME);
+
+    if (isProduction) {
+      const missing: string[] = [];
+      if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+        missing.push('UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN');
+      }
+      if (!process.env.MCP_OAUTH_TOKEN_SECRET) {
+        missing.push('MCP_OAUTH_TOKEN_SECRET');
+      }
+      if (missing.length > 0) {
+        console.error(`[OAuth] FATAL: Production requires: ${missing.join(', ')}`);
+        process.exit(1);
+      }
+    }
+
+    const store =
+      process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+        ? new KvOAuthStore(
+            process.env.UPSTASH_REDIS_REST_URL,
+            process.env.UPSTASH_REDIS_REST_TOKEN,
+          )
+        : (() => {
+            console.warn('[OAuth] No KV config — using in-memory store (dev only)');
+            return new MemoryOAuthStore();
+          })();
+
     const port = Number.parseInt(process.env.PORT || '3000', 10);
-    await server.startHttp(port);
+    const server = new MusashiMcpServer();
+    await server.startHttp(port, store);
     return;
   }
 
+  const server = new MusashiMcpServer();
   await server.startStdio();
 }
 

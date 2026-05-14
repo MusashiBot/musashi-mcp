@@ -108,7 +108,7 @@ test('HTTP transport exposes OAuth discovery metadata', async (t) => {
   assert.equal(discovery.authorization_endpoint, `http://127.0.0.1:${port}/oauth/authorize`);
   assert.equal(discovery.token_endpoint, `http://127.0.0.1:${port}/oauth/token`);
   assert.deepEqual(discovery.response_types_supported, ['code']);
-  assert.deepEqual(discovery.grant_types_supported, ['authorization_code']);
+  assert.deepEqual(discovery.grant_types_supported, ['authorization_code', 'refresh_token']);
 });
 
 test('HTTP transport honors configured public MCP base URL in OAuth metadata', async (t) => {
