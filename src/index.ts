@@ -392,7 +392,7 @@ class MusashiMcpServer {
         {
           name: 'analyze_text',
           description:
-            'Use this when the user asks Musashi to analyze a claim, tweet, headline, or free-form text against live market data.',
+            'Analyze a claim, tweet, headline, or free-form text against live prediction market data. Use this when the user mentions a statement, prediction, or news headline and wants to know what the markets say about it.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -410,7 +410,7 @@ class MusashiMcpServer {
         {
           name: 'get_arbitrage',
           description:
-            'Use this when the user asks what can be arbitraged right now between Polymarket and Kalshi, or asks for cross-platform spread opportunities.',
+            'Find current arbitrage opportunities between Polymarket and Kalshi. Use this when the user asks about price discrepancies, spreads, or cross-platform trading opportunities.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -442,7 +442,7 @@ class MusashiMcpServer {
         {
           name: 'get_movers',
           description:
-            'Use this when the user asks for biggest movers, largest price changes, or what markets are moving now.',
+            'Get markets with the biggest recent price moves. Use this when the user asks what is moving, what changed, or wants to see large price swings.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -468,7 +468,7 @@ class MusashiMcpServer {
         {
           name: 'ground_probability',
           description:
-            'Use this when the user asks for the market-implied probability of a claim, or wants a prediction grounded in live markets.',
+            'Ground a real-world claim in live market-implied probability. Use this when the user wants to know the market\'s current probability estimate for a specific event or claim.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -486,7 +486,7 @@ class MusashiMcpServer {
         {
           name: 'get_feed',
           description:
-            'Use this when the user asks for recent feed items, analyzed tweets, breaking signals, or social/news flow from Musashi.',
+            'Get recent analyzed feed items, tweets, and breaking signals from Musashi. Use this when the user asks about recent news, social signals, or what is being discussed in prediction market circles.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -503,7 +503,7 @@ class MusashiMcpServer {
         {
           name: 'get_feed_stats',
           description:
-            'Use this when the user asks for Musashi feed statistics, volume, urgency mix, or top-mentioned markets.',
+            'Get Musashi feed statistics including volume, urgency breakdown, and top-mentioned markets. Use this for an overview of feed activity rather than individual items.',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -512,7 +512,7 @@ class MusashiMcpServer {
         {
           name: 'get_feed_accounts',
           description:
-            'Use this when the user asks which accounts or sources Musashi monitors.',
+            'List the accounts and sources that Musashi monitors for its feed. Use this when the user asks about data sources or which accounts are tracked.',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -573,39 +573,49 @@ class MusashiMcpServer {
         },
         {
           name: 'get_market_brief',
-          description: 'Combine market price, flow, movers, feed, and arbitrage context.',
+          description: 'Get a combined brief for a specific market including price, wallet flow, recent movers, feed mentions, and arbitrage context. Requires at least one of: marketId, conditionId, or query to identify the market.',
           inputSchema: {
             type: 'object',
             properties: {
               marketId: { type: 'string', description: 'Musashi or Polymarket market id.' },
               conditionId: { type: 'string', description: 'Polymarket condition id.' },
-              query: { type: 'string', description: 'Market search text.' },
+              query: { type: 'string', description: 'Market search text — use this if you only have the market name or a description.' },
               category: { type: 'string', description: 'Optional Musashi category.' },
               window: { type: 'string', enum: ['1h', '24h', '7d'], description: 'Wallet-flow window.' },
               flowLimit: { type: 'number', minimum: 1, maximum: 100, description: 'Max wallet-flow rows.' },
             },
+            anyOf: [
+              { required: ['marketId'] },
+              { required: ['conditionId'] },
+              { required: ['query'] },
+            ],
           },
         },
         {
           name: 'explain_market_move',
-          description: 'Explain a market move using movers, feed, arbitrage, and wallet flow.',
+          description: 'Explain why a specific market moved, using wallet flow, movers, feed, and arbitrage signals. Requires at least one of: marketId, conditionId, or query to identify the market. Returns a directional read and bottom-line interpretation.',
           inputSchema: {
             type: 'object',
             properties: {
               marketId: { type: 'string', description: 'Musashi or Polymarket market id.' },
               conditionId: { type: 'string', description: 'Polymarket condition id.' },
-              query: { type: 'string', description: 'Market search text.' },
+              query: { type: 'string', description: 'Market search text — use this if you only have the market name or a description.' },
               category: { type: 'string', description: 'Optional Musashi category.' },
               window: { type: 'string', enum: ['1h', '24h', '7d'], description: 'Wallet-flow window.' },
               minChange: { type: 'number', minimum: 0, maximum: 1, description: 'Minimum mover change.' },
               flowLimit: { type: 'number', minimum: 1, maximum: 100, description: 'Max wallet-flow rows.' },
             },
+            anyOf: [
+              { required: ['marketId'] },
+              { required: ['conditionId'] },
+              { required: ['query'] },
+            ],
           },
         },
         {
           name: 'get_health',
           description:
-            'Use this when the user asks whether Musashi is healthy, available, or up to date.',
+            'Check the health and availability of the Musashi API and its data sources (Polymarket, Kalshi). Use this when the user asks if the service is working or data is fresh.',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -1235,7 +1245,7 @@ class MusashiMcpServer {
 
     if (context.unavailable.length > 0) {
       lines.push('');
-      lines.push(`Unavailable context: ${context.unavailable.join('; ')}`);
+      lines.push(`Note: Some data sources were unavailable (${context.unavailable.map(u => u.split(':')[0]).join(', ')}). Results may be partial.`);
     }
 
     return buildTextResult(lines);
@@ -1303,7 +1313,7 @@ class MusashiMcpServer {
 
     if (context.unavailable.length > 0) {
       lines.push('');
-      lines.push(`Unavailable context: ${context.unavailable.join('; ')}`);
+      lines.push(`Note: Some data sources were unavailable (${context.unavailable.map(u => u.split(':')[0]).join(', ')}). Results may be partial.`);
     }
 
     return buildTextResult(lines);

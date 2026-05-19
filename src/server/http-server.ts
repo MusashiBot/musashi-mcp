@@ -1,4 +1,9 @@
 /**
+ * @deprecated This HTTP+SSE server is no longer used in production.
+ * The active transport is StreamableHttpServer in streamable-http-server.ts
+ * which implements the MCP Streamable HTTP transport (2025-06-18).
+ * This file is retained for reference only and will be removed in a future cleanup.
+ *
  * HTTP server for MCP protocol
  * Handles session creation, SSE streaming, and message routing
  */
